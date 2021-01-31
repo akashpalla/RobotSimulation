@@ -85,9 +85,6 @@ public class Elevator extends SubsystemBase {
 
         
         // The above is PID and its calculations. This is all explained here: https://youtu.be/jIKBWO7ps0w?t=263
-
-        
-        // Makes sure the caluclated percent output falls between [-1, 1]. This is typically done automatically by the Talon, but this code must be written since it is a simulation
     
         lastError = error;
         lastTimeStamp = Timer.getFPGATimestamp();
