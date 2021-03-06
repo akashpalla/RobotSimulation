@@ -5,6 +5,8 @@
 package frc.robot.subsystems;
 
 import com.ctre.phoenix.motorcontrol.ControlMode;
+import com.ctre.phoenix.motorcontrol.DemandType;
+import com.ctre.phoenix.motorcontrol.TalonSRXSimCollection;
 import com.ctre.phoenix.motorcontrol.can.WPI_TalonSRX;
 
 import edu.wpi.first.wpilibj.RobotBase;
@@ -26,15 +28,11 @@ public class Elevator extends SubsystemBase {
   private WPI_TalonSRX elevatorMaster, elevatorFollower;
   private DigitalInputWrapper bottomLimitSwitch;
   
-  private DCMotor elevatorMotorsim;
+  private DCMotor elevatorMotors;
   private ElevatorSim elevatorSim;
+  private TalonSRXSimCollection elevatorMasterSim;
 
-
-  private double motorOutput;
-  private double setpoint;
-
-
-  
+  private double setpointMeters;
 
   public enum ElevatorState{
     ZEROED, SETPOINT, DISABLED;
@@ -46,8 +44,8 @@ public class Elevator extends SubsystemBase {
 
   public Elevator() {
 
-    elevatorMotorsim = DCMotor.getVex775Pro(2);
-    elevatorSim = new ElevatorSim(elevatorMotorsim, Constants.Elevator.kGearRatio, Constants.Elevator.kCarriageMass, Constants.Elevator.kPulleyRadius, Constants.Elevator.kMinHeight, Constants.Elevator.kMaxHeight);
+    elevatorMotors = DCMotor.getVex775Pro(2);
+    elevatorSim = new ElevatorSim(elevatorMotors, Constants.Elevator.kGearRatio, Constants.Elevator.kCarriageMass, Constants.Elevator.kPulleyRadiusMeters, Constants.Elevator.kMinHeight, Constants.Elevator.kMaxHeight);
     
     elevatorMaster = new WPI_TalonSRX(1);
     elevatorFollower = new WPI_TalonSRX(2);
@@ -56,21 +54,20 @@ public class Elevator extends SubsystemBase {
 
     elevatorMaster.configFactoryDefault();   // Resets any motor settings such as inversions, current limiting from previous programs
     elevatorFollower.configFactoryDefault();
-
     elevatorFollower.follow(elevatorMaster);
 
-    motorOutput = 0;
-    setpoint = 0;
+    elevatorMaster.config_kP(0, Constants.Elevator.kP);
+    elevatorMaster.config_kI(0, Constants.Elevator.kI);
+    elevatorMaster.config_kD(0, Constants.Elevator.kD);
+    
+    elevatorMasterSim = elevatorMaster.getSimCollection();
+
+    setpointMeters = 0;
 
     updateState(ElevatorState.DISABLED);
   }
 
   
-  double integralLimit = 1;
-  double errorSum = 0;
-  double lastError = 0;
-  double lastTimeStamp = 0;
-
   public void periodic() {
 
     switch(currState){
@@ -78,31 +75,17 @@ public class Elevator extends SubsystemBase {
       case SETPOINT:
 
         SmartDashboard.putString("Elevator State", "SETPOINT");
-        double error = setpoint - getElevatorHeight();
-        double dt = Timer.getFPGATimestamp() - lastTimeStamp;  // Should be approximately 0.02s
-        double errorRate = (error - lastError) /dt;
-
-        errorSum += error*dt;
-
-        motorOutput = (Constants.Elevator.kP* error) + (Constants.Elevator.kI * errorSum) + (Constants.Elevator.kD * errorRate);
-
-        
-        // The above is PID and its calculations. This is all explained here: https://youtu.be/jIKBWO7ps0w?t=263
-    
-        lastError = error;
-        lastTimeStamp = Timer.getFPGATimestamp();
-
-
-      if(setpoint == Constants.Elevator.kBottomSetpoint && bottomLimitSwitch.get()){
+      
+        if(setpointMeters == Constants.Elevator.kBottomSetpoint && bottomLimitSwitch.get()){
           currState = ElevatorState.ZEROED;
         }
 
-        if(setpoint == Constants.Elevator.kBottomSetpoint && getElevatorHeight() <= 0.1){
+        if(setpointMeters == Constants.Elevator.kBottomSetpoint && getHeight() <= 0.1){
           currState = ElevatorState.ZEROED;
         }
       
         
-        elevatorMaster.set(ControlMode.PercentOutput, motorOutput);
+        elevatorMaster.set(ControlMode.Position, heightToTicks(setpointMeters), DemandType.ArbitraryFeedForward, .267); // Arbitrary FeedForward = Gravity Compensation. Adds .267 to the motor output
         break;
 
       case ZEROED:
@@ -127,13 +110,24 @@ public class Elevator extends SubsystemBase {
     
   }
   
+  public double getHeight(){
+    return ticksToHeight(elevatorMaster.getSelectedSensorPosition());
+  }
 
+  private int heightToTicks(double height){
+    double pulleyRotations = height / (2 * Math.PI * Constants.Elevator.kPulleyRadiusMeters);
+    double motorRotations = pulleyRotations * Constants.Elevator.kGearRatio;
+    int ticks = (int)(motorRotations * Constants.Elevator.kTicksPerRevolution);
 
-  public double getElevatorHeight(){
-    if(RobotBase.isReal()){
-      return elevatorMaster.getSelectedSensorPosition() * Constants.Elevator.kDistancePerTick;
-    }
-    return elevatorSim.getPositionMeters();
+    return ticks;
+  }
+
+  private double ticksToHeight(double ticks){
+    double motorRotations = ticks/Constants.Elevator.kTicksPerRevolution;
+    double pulleyRotations = motorRotations / Constants.Elevator.kGearRatio;
+    double height = pulleyRotations * (2  * Math.PI * Constants.Elevator.kPulleyRadiusMeters);
+    
+    return height;
   }
 
   public void simPeriodic(){
@@ -142,12 +136,15 @@ public class Elevator extends SubsystemBase {
       else 
         bottomLimitSwitch.set(false);
 
-      elevatorSim.setInput(elevatorMaster.getMotorOutputPercent()* RobotController.getBatteryVoltage());
+      elevatorSim.setInput(elevatorMaster.getMotorOutputVoltage());     // Feed motor Output into the physics Sim
       elevatorSim.update(.02);
 
-      RoboRioSim.setVInVoltage(BatterySim.calculateDefaultBatteryLoadedVoltage(elevatorSim.getCurrentDrawAmps()));
+      RoboRioSim.setVInVoltage(BatterySim.calculateDefaultBatteryLoadedVoltage(elevatorSim.getCurrentDrawAmps()));   
 
+      elevatorMasterSim.setQuadratureRawPosition(heightToTicks(elevatorSim.getPositionMeters()));         // Update Encoders based on WPIlib Sim
+      elevatorMasterSim.setQuadratureVelocity(heightToTicks(elevatorSim.getVelocityMetersPerSecond()));
 
+      elevatorMasterSim.setBusVoltage(RoboRioSim.getVInVoltage());
   }
 
   public void updateState(ElevatorState newState){
@@ -155,20 +152,18 @@ public class Elevator extends SubsystemBase {
   }
 
   public void updateSetpoint(double newSetpoint){
-    setpoint = newSetpoint;
+    setpointMeters = newSetpoint;
   }
-
 
 
   /**
    * Prints data to Smart Dashboard
    */
   public void log(){
-    SmartDashboard.putNumber("Motor Output [-1, 1]", motorOutput);
-    SmartDashboard.putNumber("Elevator Position", elevatorSim.getPositionMeters());
-    SmartDashboard.putNumber("Elevator Velocity", elevatorSim.getVelocityMetersPerSecond());
-    SmartDashboard.putNumber("Setpoint", setpoint);
-    SmartDashboard.putNumber("Error", setpoint - elevatorSim.getPositionMeters());
+    SmartDashboard.putNumber("Motor Output [-1, 1]", elevatorMaster.getMotorOutputPercent());
+    SmartDashboard.putNumber("Elevator Position", ticksToHeight(elevatorMaster.getSelectedSensorPosition()));
+    SmartDashboard.putNumber("Setpoint", heightToTicks(setpointMeters));
+    SmartDashboard.putNumber("Error", setpointMeters - getHeight());
     SmartDashboard.putBoolean("Bottom Limit Switch", bottomLimitSwitch.get());
 
     
